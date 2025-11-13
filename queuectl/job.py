@@ -100,22 +100,26 @@ def get_summary():
     }
 
 def claim_next_pending(worker_id: str):
+    """
+    Atomically claim a pending job by selecting a candidate and then updating it.
+    The UPDATE uses WHERE state='pending' so only one worker can successfully claim it.
+    Returns a dict with id, command, attempts, max_retries or None if nothing available.
+    """
     now = datetime.utcnow().strftime(TIMEFMT)
     with get_cursor() as c:
-        c.execute("BEGIN IMMEDIATE")
+        # pick a candidate (no explicit BEGIN/COMMIT here)
         row = c.execute("""SELECT id,command,attempts,max_retries FROM jobs
                          WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?)
                          ORDER BY created_at LIMIT 1""", (now,)).fetchone()
         if not row:
-            c.execute("COMMIT")
             return None
         job_id = row[0]
+        # try to claim it atomically; only one updater will succeed
         res = c.execute("UPDATE jobs SET state='processing', lock_owner=?, updated_at=? WHERE id=? AND state='pending'",
                         (worker_id, now, job_id))
+        # sqlite3.Cursor.rowcount available; if 0 then someone else claimed it
         if res.rowcount == 0:
-            c.execute("ROLLBACK")
             return None
-        c.execute("COMMIT")
         return {
             "id": job_id,
             "command": row[1],
